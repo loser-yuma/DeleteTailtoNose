@@ -1,6 +1,6 @@
 # README
 
-## 消去しりとり（DeleteTaletoNose）
+## 消去しりとり（DeleteTailtoNose）
 
 五十音を持ち駒として使うしりとりゲームです。
 
@@ -28,7 +28,7 @@ npm run dev -- --host 0.0.0.0
 
 `main` ブランチにpushすると、GitHub ActionsがビルドしてPagesへ公開します。GitHubリポジトリの Settings > Pages で、公開元を「GitHub Actions」に設定してください。
 
-公開URL: https://loser-yuma.github.io/DeleteTaletoNose/
+公開URL: https://loser-yuma.github.io/DeleteTailtoNose/
 
 ## ルールメモ
 
