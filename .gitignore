@@ -1,9 +1,2 @@
-{
-  "name": "DeleteTailtoNose",
-  "version": "1.0.0",
-  "private": true,
-  "ignore": [
-    "node_modules",
-    "dist"
-  ]
-}
+node_modules/
+dist/
