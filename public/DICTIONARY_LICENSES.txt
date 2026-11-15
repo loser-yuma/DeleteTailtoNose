@@ -1,0 +1,11 @@
+This application bundles word data derived from:
+
+- JMdict, Electronic Dictionary Research and Development Group (EDRDG)
+  License: Creative Commons Attribution-ShareAlike 4.0 International
+  https://www.edrdg.org/jmdict/j_jmdict.html
+
+- SudachiDict, Works Applications Co., Ltd.
+  License: Apache License 2.0
+  https://github.com/WorksApplications/SudachiDict
+
+The bundled dictionary is a derived, normalized word-to-reading index.

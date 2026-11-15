@@ -27,10 +27,7 @@ const BASE_MAP = {
   'ゃ':'や','ゅ':'ゆ','ょ':'よ','っ':'つ','ゎ':'わ','ゕ':'か','ゖ':'け',
 };
 
-const WIKI_APIS = [
-  'https://ja.wiktionary.org/w/api.php',
-  'https://ja.wikipedia.org/w/api.php',
-];
+const DICTIONARY_URL = `${import.meta.env.BASE_URL}dictionary.data`;
 
 const MAX_PLAYERS = 4;
 const ONLINE_ROOM_KEY = 'delete-tailto-nose-room';
@@ -70,70 +67,31 @@ function sanitizePlayerName(name, fallback) {
   return cleanName || fallback;
 }
 
-async function lookupWikiEntry(word) {
-  const hiragana = normalizeWord(word);
-  const katakana = hiragana.replace(/[ぁ-ゖ]/g, ch => String.fromCharCode(ch.charCodeAt(0) + 0x60));
-  const titles = [...new Set([word.trim(), hiragana, katakana])].join('|');
-
-  const results = await Promise.all(WIKI_APIS.map(async api => {
-    const params = new URLSearchParams({
-      action: 'query',
-      format: 'json',
-      titles,
-      redirects: '1',
-      prop: 'pageprops|categories',
-      ppprop: 'defaultsort|disambiguation',
-      clprop: 'sortkeyprefix',
-      cllimit: 'max',
-      origin: '*',
-    });
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
-
-    try {
-      const response = await fetch(`${api}?${params}`, { signal: controller.signal });
-      if (!response.ok) return null;
-
-      const result = await response.json();
-      const pages = Object.values(result.query?.pages || {});
-      const foundPages = pages.filter(candidate => !Object.hasOwn(candidate, 'missing'));
-      if (!foundPages.length) return false;
-
-      const readablePage = foundPages.map(page => {
-        const candidates = [
-          page.pageprops?.defaultsort?.split(/\s+/)[0],
-          ...(page.categories || []).map(category => category.sortkeyprefix),
-          page.title,
-          hiragana,
-        ];
-        const reading = candidates
-          .filter(Boolean)
-          .map(candidate => normalizeWord(candidate))
-          .find(candidate => /^[ぁ-ゖー]+$/.test(candidate));
-        return reading ? { found: true, reading } : null;
-      }).find(Boolean);
-
-      return readablePage || { found: true, reading: null };
-    } catch {
-      return null;
-    } finally {
-      clearTimeout(timeout);
-    }
-  }));
-
-  const readableEntry = results.find(result => result?.found && result.reading);
-  if (readableEntry) return readableEntry;
-  if (results.some(result => result?.found)) return { found: true, reading: null };
-  if (results.every(result => result === false)) return { found: false, reading: null };
-  throw new Error('辞書に接続できませんでした。');
-}
-
 function normalizeWord(word) {
   const normalized = kanaToHiragana(word)
     .replace(/[\uFF01-\uFF5E]/g, char => String.fromCharCode(char.charCodeAt(0) - 0xFEE0))
     .replace(/\r|\n/g, '');
 
   return normalized;
+}
+
+let dictionary = new Map();
+
+async function loadDictionary() {
+  const response = await fetch(DICTIONARY_URL);
+  if (!response.ok) {
+    throw new Error(`辞書データを読み込めませんでした: ${response.status}`);
+  }
+
+  const compressed = await response.arrayBuffer();
+  const stream = new Blob([compressed]).stream().pipeThrough(new DecompressionStream('gzip'));
+  const text = await new Response(stream).text();
+  dictionary = new Map(JSON.parse(text));
+}
+
+function lookupDictionaryEntry(word) {
+  const reading = dictionary.get(normalizeWord(word));
+  return reading ? { found: true, reading } : { found: false, reading: null };
 }
 
 function countChars(chars) {
@@ -534,7 +492,7 @@ function renderState(app, state) {
             <li>単語の先頭以外の文字は、持ち駒から使います。使った駒は戻りません。</li>
             <li>「ん」で終わる単語を言うと負けです。持ち駒を先に使い切るか、相手が単語を作れなくなると勝ちです。</li>
           </ol>
-          <p class="rules-note">単語の読みを確認するにはインターネット接続が必要です。</p>
+          <p class="rules-note">JMdictとSudachiDictを元にした内蔵辞書で単語を確認します。</p>
         </section>
       ` : ''}
 
@@ -692,16 +650,12 @@ function renderState(app, state) {
     renderState(app, currentState);
 
     try {
-      const entry = await lookupWikiEntry(rawValue.trim());
+      await dictionaryReady;
+      const entry = lookupDictionaryEntry(rawValue.trim());
       if (state !== currentState) return;
       currentState.pending = false;
       if (!entry.found) {
-        currentState.lastError = 'WikipediaまたはWiktionaryで見つかりませんでした。';
-        renderState(app, currentState);
-        return;
-      }
-      if (!entry.reading) {
-        currentState.lastError = '辞書項目の読みを確認できませんでした。';
+        currentState.lastError = '辞書に登録されていない単語です。';
         renderState(app, currentState);
         return;
       }
@@ -709,7 +663,7 @@ function renderState(app, state) {
     } catch {
       if (state !== currentState) return;
       currentState.pending = false;
-      currentState.lastError = '辞書に接続できませんでした。通信を確認して再度お試しください。';
+      currentState.lastError = '辞書データを読み込めませんでした。ページを再読み込みしてください。';
       renderState(app, currentState);
       return;
     }
@@ -787,6 +741,9 @@ function renderState(app, state) {
 
 let app;
 let state;
+const dictionaryReady = new Promise((resolve, reject) => {
+  setTimeout(() => loadDictionary().then(resolve, reject), 100);
+});
 
 function init() {
   app = document.querySelector('#app');
