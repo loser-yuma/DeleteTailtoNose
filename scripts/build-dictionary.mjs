@@ -2,11 +2,11 @@ import fs from 'node:fs';
 import readline from 'node:readline';
 import { gzipSync } from 'node:zlib';
 
-const [jmdictPath, ...sudachiPaths] = process.argv.slice(2);
+const [jmdictPath, jmnedictPath, ...sudachiPaths] = process.argv.slice(2);
 const outputPath = 'public/dictionary.data';
 
-if (!jmdictPath) {
-  throw new Error('Usage: node scripts/build-dictionary.mjs <JMdict JSON> [Sudachi CSV ...]');
+if (!jmdictPath || !jmnedictPath) {
+  throw new Error('Usage: node scripts/build-dictionary.mjs <JMdict JSON> <JMnedict JSON> [Sudachi CSV ...]');
 }
 
 function normalizeWord(word) {
@@ -41,27 +41,32 @@ function addEntry(dictionary, surface, reading) {
 }
 
 const dictionary = new Map();
-const jmdict = JSON.parse(fs.readFileSync(jmdictPath, 'utf8'));
 
-for (const entry of jmdict.words || []) {
-  const readings = entry.kana
-    .map(item => item.text)
-    .filter(Boolean);
+function addJmdictEntries(path) {
+  const source = JSON.parse(fs.readFileSync(path, 'utf8'));
+  for (const entry of source.words || []) {
+    const readings = entry.kana
+      .map(item => item.text)
+      .filter(Boolean);
 
-  for (const reading of readings) {
-    addEntry(dictionary, reading, reading);
-  }
+    for (const reading of readings) {
+      addEntry(dictionary, reading, reading);
+    }
 
-  for (const kanji of entry.kanji || []) {
-    const applicableReadings = readings.filter(reading => (
-      entry.kana.some(item => item.text === reading
-        && (item.appliesToKanji.includes('*') || item.appliesToKanji.includes(kanji.text)))
-    ));
-    for (const reading of applicableReadings.length ? applicableReadings : readings) {
-      addEntry(dictionary, kanji.text, reading);
+    for (const kanji of entry.kanji || []) {
+      const applicableReadings = readings.filter(reading => (
+        entry.kana.some(item => item.text === reading
+          && (item.appliesToKanji.includes('*') || item.appliesToKanji.includes(kanji.text)))
+      ));
+      for (const reading of applicableReadings.length ? applicableReadings : readings) {
+        addEntry(dictionary, kanji.text, reading);
+      }
     }
   }
 }
+
+addJmdictEntries(jmdictPath);
+addJmdictEntries(jmnedictPath);
 
 for (const sudachiPath of sudachiPaths) {
   const input = readline.createInterface({
