@@ -28,6 +28,7 @@ const BASE_MAP = {
 };
 
 const DICTIONARY_URL = `${import.meta.env.BASE_URL}dictionary.data`;
+const DICTIONARY_LOAD_TIMEOUT_MS = 15000;
 
 const MAX_PLAYERS = 4;
 const ONLINE_ROOM_KEY = 'delete-tailto-nose-room';
@@ -78,15 +79,29 @@ function normalizeWord(word) {
 let dictionary = new Map();
 
 async function loadDictionary() {
-  const response = await fetch(DICTIONARY_URL);
-  if (!response.ok) {
-    throw new Error(`辞書データを読み込めませんでした: ${response.status}`);
-  }
+  const controller = new AbortController();
+  let timeout;
+  const load = (async () => {
+    const response = await fetch(DICTIONARY_URL, { signal: controller.signal });
+    if (!response.ok) {
+      throw new Error(`辞書データを読み込めませんでした: ${response.status}`);
+    }
 
-  const compressed = await response.arrayBuffer();
-  const stream = new Blob([compressed]).stream().pipeThrough(new DecompressionStream('gzip'));
-  const text = await new Response(stream).text();
-  dictionary = new Map(JSON.parse(text));
+    const compressed = await response.arrayBuffer();
+    const stream = new Blob([compressed]).stream().pipeThrough(new DecompressionStream('gzip'));
+    const text = await new Response(stream).text();
+    return JSON.parse(text);
+  })();
+  const deadline = new Promise((_, reject) => {
+    timeout = setTimeout(() => reject(new Error('辞書データの読み込みがタイムアウトしました。')), DICTIONARY_LOAD_TIMEOUT_MS);
+  });
+
+  try {
+    dictionary = new Map(await Promise.race([load, deadline]));
+  } finally {
+    clearTimeout(timeout);
+    controller.abort();
+  }
 }
 
 function lookupDictionaryEntry(word) {
@@ -651,6 +666,7 @@ function renderState(app, state) {
 
     try {
       await dictionaryReady;
+      if (dictionaryLoadError) throw dictionaryLoadError;
       const entry = lookupDictionaryEntry(rawValue.trim());
       if (state !== currentState) return;
       currentState.pending = false;
@@ -741,8 +757,17 @@ function renderState(app, state) {
 
 let app;
 let state;
-const dictionaryReady = new Promise((resolve, reject) => {
-  setTimeout(() => loadDictionary().then(resolve, reject), 100);
+let dictionaryLoadError;
+const dictionaryReady = new Promise(resolve => {
+  setTimeout(async () => {
+    try {
+      await loadDictionary();
+    } catch (error) {
+      dictionaryLoadError = error;
+    } finally {
+      resolve();
+    }
+  }, 100);
 });
 
 function init() {
