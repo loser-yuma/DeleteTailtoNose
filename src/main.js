@@ -1,3 +1,5 @@
+import Peer from 'peerjs';
+
 const WORDS = [
   'あいどり','いぬ','うさぎ','えんぴつ','おかず','かえる','がっこう','きりん','くま','ぐりむ','けしごむ','こま','さくら','しろ','すし','せき','そら','たこ','ちょうちょ','つき','てんとう虫','どら焼き','なす','にほん','ぬりえ','ねこ','のこぎり','はやし','ひかり','ふくろう','へび','ほし','まつ','みず','むし','めがね','もも','やぎ','ゆき','よる','らっぱ','りんご','るすばん','れもん','ろうか','わに','ゐんか', 'うんち', 'ちょう','おうち','ちいさな','かなかな','なべ','べんとう','とうもろこし','しっぽ','ぽっぽ','ぴかぴか','かたつむり','むしとり','りす','すいか','かき','きのこ','こおり','りょうり','やさい','いちご','ごりら','らいおん','おに','にんじん','じゅうたん','たんぽぽ','ぽてと','とんぼ','ぼうし','しおかぜ','ぜんぶ','ぶどう','うどん','どんぐり','りゅう','ゆうひ','ひつじ','じてんしゃ','しゃぼん','ん'
 ];
@@ -30,6 +32,25 @@ const WIKI_APIS = [
   'https://ja.wikipedia.org/w/api.php',
 ];
 
+const MAX_PLAYERS = 4;
+const ONLINE_ROOM_KEY = 'delete-tailto-nose-room';
+
+function makeRoomCode() {
+  return Math.random().toString(36).slice(2, 8).toUpperCase();
+}
+
+function createOnlineConnection() {
+  return {
+    peer: null,
+    connections: new Map(),
+    room: '',
+    isHost: false,
+    connected: false,
+    error: '',
+    name: '',
+  };
+}
+
 function kanaToHiragana(text) {
   return text
     .normalize('NFKC')
@@ -42,6 +63,11 @@ function kanaToHiragana(text) {
 
 function baseKana(ch) {
   return BASE_MAP[ch] || ch;
+}
+
+function sanitizePlayerName(name, fallback) {
+  const cleanName = String(name || '').replace(/[<>&"'`]/g, '').trim().slice(0, 12);
+  return cleanName || fallback;
 }
 
 async function lookupWikiEntry(word) {
@@ -210,7 +236,11 @@ function makePlayer(name, isHuman) {
 function stateFactory(mode = 'cpu') {
   const players = [
     makePlayer('プレイヤー1', true),
-    mode === 'cpu' ? makePlayer('CPU', false) : makePlayer('プレイヤー2', true)
+    ...(mode === 'cpu'
+      ? [makePlayer('CPU', false)]
+      : mode === 'local'
+        ? [makePlayer('プレイヤー2', true)]
+        : [])
   ];
 
   return {
@@ -226,6 +256,9 @@ function stateFactory(mode = 'cpu') {
     selectedWord: '',
     pending: false,
     showRules: false,
+    online: createOnlineConnection(),
+    room: '',
+    lobby: mode === 'online',
   };
 }
 
@@ -247,7 +280,219 @@ function renderHand(hand) {
     .join('');
 }
 
+function onlineSnapshot(state) {
+  return {
+    type: 'state',
+    state: {
+      mode: 'online',
+      players: state.players.map(({ isHuman, ...player }) => ({ ...player })),
+      history: state.history,
+      currentLead: state.currentLead,
+      activeIndex: state.activeIndex,
+      gameOver: state.gameOver,
+      winner: state.winner,
+      status: state.status,
+      lastError: state.lastError,
+      selectedWord: '',
+      pending: false,
+      showRules: false,
+      room: state.room,
+      lobby: state.lobby,
+    },
+  };
+}
+
+function broadcastOnlineState(state) {
+  if (!state.online.isHost || !state.online.connections.size || state.lobby) return;
+  const message = onlineSnapshot(state);
+  state.online.connections.forEach(connection => connection.send(message));
+}
+
+function renderOnlineLobby(app, state) {
+  const online = state.online;
+  const players = state.players.map(player => `<li>${player.name}${player.peerId === online.peerId ? '（あなた）' : ''}</li>`).join('');
+  app.innerHTML = `
+    <div class="shell">
+      <header class="topbar">
+        <div class="brand"><h1>消去しりとり</h1></div>
+        <div class="toolbar">
+          <label>対戦モード
+            <select id="mode-select">
+              <option value="cpu">CPU対戦</option>
+              <option value="local">ローカル対戦</option>
+              <option value="online" selected>オンライン対戦</option>
+            </select>
+          </label>
+          <button id="new-game" class="primary">最初から</button>
+        </div>
+      </header>
+      <main class="online-lobby">
+        <h2>オンライン対戦（最大4人）</h2>
+        <p class="status-text">名前を入力してルームを作成するか、招待コードで参加してください。</p>
+        <label for="online-name">プレイヤー名</label>
+        <input id="online-name" type="text" maxlength="12" value="${online.name}" placeholder="プレイヤー1" />
+        <div class="online-actions">
+          <button id="create-room" class="primary">ルームを作成</button>
+          <input id="room-input" type="text" maxlength="6" placeholder="招待コード" aria-label="招待コード" />
+          <button id="join-room" class="secondary">参加する</button>
+        </div>
+        ${online.room ? `
+          <div class="room-card">
+            <strong>招待コード: ${online.room}</strong>
+            <p>このコードを友だちに共有してください。</p>
+            <ol>${players || '<li>参加者を待っています…</li>'}</ol>
+            ${online.isHost ? '<button id="start-online" class="primary">対戦を開始</button>' : '<p>ホストが対戦を開始するまでお待ちください。</p>'}
+          </div>
+        ` : ''}
+        ${online.error ? `<p class="status-error" role="alert">${online.error}</p>` : ''}
+      </main>
+    </div>
+  `;
+
+  const nameInput = document.querySelector('#online-name');
+  nameInput?.addEventListener('input', event => { online.name = event.target.value; });
+  document.querySelector('#create-room')?.addEventListener('click', () => createOnlineRoom(state));
+  document.querySelector('#join-room')?.addEventListener('click', () => {
+    joinOnlineRoom(state, document.querySelector('#room-input')?.value || '');
+  });
+  document.querySelector('#start-online')?.addEventListener('click', () => {
+    if (!online.isHost || state.players.length < 2) {
+      online.error = '参加者が1人以上必要です。';
+      renderState(app, state);
+      return;
+    }
+    state.lobby = false;
+    state.status = `${getActivePlayer(state).name}の番です。`;
+    broadcastOnlineState(state);
+    renderState(app, state);
+  });
+  document.querySelector('#mode-select')?.addEventListener('change', event => {
+    const nextState = stateFactory(event.target.value);
+    state = nextState;
+    renderState(app, state);
+  });
+  document.querySelector('#new-game')?.addEventListener('click', () => {
+    state = stateFactory(document.querySelector('#mode-select')?.value || 'online');
+    renderState(app, state);
+  });
+}
+
+function attachOnlineConnection(state, connection) {
+  state.online.connections.set(connection.peer, connection);
+  connection.on('data', message => {
+    if (state.online.isHost && message?.type === 'hello') {
+      if (state.players.length >= MAX_PLAYERS) {
+        connection.send({ type: 'error', message: 'このルームは満員です。' });
+        connection.close();
+        return;
+      }
+      const player = makePlayer(sanitizePlayerName(message.name, `プレイヤー${state.players.length + 1}`), false);
+      player.peerId = connection.peer;
+      state.players.push(player);
+      connection.send(onlineSnapshot(state));
+      renderState(app, state);
+      return;
+    }
+
+    if (state.online.isHost && message?.type === 'move') {
+      const index = state.players.findIndex(player => player.peerId === connection.peer);
+      if (index !== state.activeIndex || state.lobby) return;
+      requestMove(state, message.word);
+      return;
+    }
+
+    if (state.online.isHost && message?.type === 'giveup') {
+      const index = state.players.findIndex(player => player.peerId === connection.peer);
+      if (index !== state.activeIndex || state.lobby || state.gameOver) return;
+      const player = state.players[index];
+      const winner = getOpponentPlayer(state);
+      state.gameOver = true;
+      state.winner = winner.name;
+      state.status = `${player.name}がギブアップしました。${winner.name}の勝ちです。`;
+      renderState(app, state);
+      return;
+    }
+
+    if (!state.online.isHost && message?.type === 'state') {
+      const snapshot = message.state;
+      Object.assign(state, snapshot, { online: state.online, pending: false });
+      state.players = snapshot.players.map(player => ({
+        ...player,
+        isHuman: player.peerId === state.online.peerId,
+      }));
+      renderState(app, state);
+    }
+  });
+  connection.on('close', () => {
+    state.online.connections.delete(connection.peer);
+    if (state.online.isHost) {
+      const removedIndex = state.players.findIndex(player => player.peerId === connection.peer);
+      if (removedIndex !== -1) {
+        state.players.splice(removedIndex, 1);
+        if (state.activeIndex >= state.players.length) state.activeIndex = 0;
+        renderState(app, state);
+      }
+    }
+  });
+}
+
+function createOnlineRoom(state) {
+  const room = makeRoomCode();
+  const peer = new Peer(`shiri-${room.toLowerCase()}`);
+  state.online = { ...createOnlineConnection(), peer, isHost: true, room, name: state.online.name || 'プレイヤー1' };
+  state.room = room;
+  state.online.name = sanitizePlayerName(state.online.name, 'プレイヤー1');
+  state.players[0].name = state.online.name;
+  state.players[0].peerId = `shiri-${room.toLowerCase()}`;
+  peer.on('open', () => {
+    state.online.connected = true;
+    state.online.peerId = peer.id;
+    state.online.error = '';
+    renderState(app, state);
+  });
+  peer.on('connection', connection => attachOnlineConnection(state, connection));
+  peer.on('error', error => {
+    state.online.error = error.type === 'unavailable-id'
+      ? 'そのルームコードは使用中です。もう一度作成してください。'
+      : '接続に失敗しました。時間をおいて再度お試しください。';
+    renderState(app, state);
+  });
+  renderState(app, state);
+}
+
+function joinOnlineRoom(state, rawRoom) {
+  const room = rawRoom.trim().toUpperCase();
+  if (!/^[A-Z0-9]{6}$/.test(room)) {
+    state.online.error = '6桁の招待コードを入力してください。';
+    renderState(app, state);
+    return;
+  }
+  const peer = new Peer();
+  state.online = { ...createOnlineConnection(), peer, room, name: sanitizePlayerName(state.online.name, 'プレイヤー') };
+  state.room = room;
+  peer.on('open', () => {
+    state.online.peerId = peer.id;
+    const connection = peer.connect(`shiri-${room.toLowerCase()}`, { reliable: true });
+    connection.on('open', () => {
+      attachOnlineConnection(state, connection);
+      connection.send({ type: 'hello', name: state.online.name });
+      state.online.connected = true;
+      renderState(app, state);
+    });
+  });
+  peer.on('error', () => {
+    state.online.error = 'ルームに接続できませんでした。コードを確認してください。';
+    renderState(app, state);
+  });
+  renderState(app, state);
+}
+
 function renderState(app, state) {
+  if (state.mode === 'online' && state.lobby) {
+    renderOnlineLobby(app, state);
+    return;
+  }
+  broadcastOnlineState(state);
   const active = getActivePlayer(state);
   const opponent = getOpponentPlayer(state);
   const canHumanAct = !state.gameOver && !state.pending && active.isHuman;
@@ -265,6 +510,7 @@ function renderState(app, state) {
             <select id="mode-select">
               <option value="cpu" ${state.mode === 'cpu' ? 'selected' : ''}>CPU対戦</option>
               <option value="local" ${state.mode === 'local' ? 'selected' : ''}>ローカル対戦</option>
+              <option value="online" ${state.mode === 'online' ? 'selected' : ''}>オンライン対戦</option>
             </select>
           </label>
           <button id="new-game" class="primary">最初から</button>
@@ -293,14 +539,16 @@ function renderState(app, state) {
       ` : ''}
 
       <main class="board">
-        <section class="arena">
-          <div class="player-card ${state.activeIndex === 0 ? 'is-active' : ''}" role="group" aria-label="${state.players[0].name}の持ち駒">
-            <div class="player-header">
-              <span>${state.players[0].name}</span>
-              <span class="badge">${state.players[0].hand.length}枚${state.activeIndex === 0 ? '・手番' : ''}</span>
+        <section class="arena ${state.mode === 'online' ? 'online-arena' : ''}">
+          ${state.players.map((player, index) => `
+            <div class="player-card ${state.activeIndex === index ? 'is-active' : ''}" role="group" aria-label="${player.name}の持ち駒">
+              <div class="player-header">
+                <span>${player.name}${player.isHuman && state.mode === 'online' ? '（あなた）' : ''}</span>
+                <span class="badge">${player.hand.length}枚${state.activeIndex === index ? '・手番' : ''}</span>
+              </div>
+              <div class="hand" role="group" aria-label="持ち駒 ${player.hand.length}枚">${renderHand(player.hand)}</div>
             </div>
-            <div class="hand" role="group" aria-label="持ち駒 ${state.players[0].hand.length}枚">${renderHand(state.players[0].hand)}</div>
-          </div>
+          `).join('')}
 
           <div class="status-panel ${state.gameOver ? 'is-game-over' : ''}">
             <div class="lead-box">
@@ -312,13 +560,6 @@ function renderState(app, state) {
             ${state.gameOver ? `<p class="winner-box">勝者: ${state.winner}</p>` : ''}
           </div>
 
-          <div class="player-card ${state.activeIndex === 1 ? 'is-active' : ''}" role="group" aria-label="${state.players[1].name}の持ち駒">
-            <div class="player-header">
-              <span>${state.players[1].name}</span>
-              <span class="badge">${state.players[1].hand.length}枚${state.activeIndex === 1 ? '・手番' : ''}</span>
-            </div>
-            <div class="hand" role="group" aria-label="持ち駒 ${state.players[1].hand.length}枚">${renderHand(state.players[1].hand)}</div>
-          </div>
         </section>
 
         <section class="controls">
@@ -375,6 +616,16 @@ function renderState(app, state) {
   document.querySelector('#give-up')?.addEventListener('click', () => {
     if (state.gameOver || state.pending || !getActivePlayer(state).isHuman) return;
 
+    if (state.mode === 'online' && !state.online.isHost) {
+      const connection = [...state.online.connections.values()][0];
+      if (connection?.open) {
+        state.pending = true;
+        connection.send({ type: 'giveup' });
+        renderState(app, state);
+      }
+      return;
+    }
+
     const player = getActivePlayer(state);
     const winner = getOpponentPlayer(state);
     state.gameOver = true;
@@ -417,6 +668,15 @@ function renderState(app, state) {
     if (currentState.gameOver || currentState.pending) return;
 
   const player = getActivePlayer(currentState);
+    if (currentState.mode === 'online' && !currentState.online.isHost) {
+      const connection = [...currentState.online.connections.values()][0];
+      if (!connection?.open || !player.isHuman) return;
+      currentState.pending = true;
+      currentState.lastError = '';
+      connection.send({ type: 'move', word: rawValue });
+      renderState(app, currentState);
+      return;
+    }
   let normalized = normalizeWord(rawValue);
   const lead = currentState.currentLead;
 
@@ -426,7 +686,7 @@ function renderState(app, state) {
     return;
   }
 
-  if (player.isHuman) {
+  if (player.isHuman || currentState.mode === 'online') {
     currentState.pending = true;
     currentState.lastError = '';
     renderState(app, currentState);
